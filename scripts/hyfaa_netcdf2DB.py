@@ -24,9 +24,9 @@ psycopg2.extensions.register_adapter(float, nan_to_null)
 
 
 # lambda function, CNES Julian days to Gregorian date and vice-versa
-julianday_to_datetime = lambda t: datetime(1950, 1, 1) + timedelta(t)
+julianday_to_datetime = lambda t: datetime(1950, 1, 1) + timedelta(int(t))
 datetime_to_julianday = lambda t: (t - datetime(1950, 1, 1)).total_seconds() / (24. * 3600.)
-vfunc = np.vectorize(julianday_to_datetime)
+vfunc_jd_to_dt = np.vectorize(julianday_to_datetime)
 
 
 def _retrieve_times_to_update():
@@ -42,7 +42,7 @@ def _retrieve_times_to_update():
         conn = psycopg2.connect(db['connect_url'])
         # retrieve state information from the DB, about the table we are about to update
         cursor = conn.cursor()
-        cursor.execute("SELECT last_published_day_jd, last_updated_without_errors_jd FROM {}.state WHERE tablename=%s".format(db['schema']),
+        cursor.execute("SELECT last_updated_jd, last_updated_without_errors_jd FROM {}.state WHERE tablename=%s".format(db['schema']),
                        (db['tablename'],))
         state_records = cursor.fetchall()
         if len(state_records) == 1:
@@ -54,7 +54,7 @@ def _retrieve_times_to_update():
         times_array = list(zip(
             np.arange(start=0, stop=nc.dimensions['n_time'].size, dtype='i4'),
             nc.variables['time'][:],
-            nc.variables['time_added_to_hydb_analysis'][:]
+            nc.variables['time_added_to_hydb'][:]
         ))
         # Filter to only the times posterior to last update (fetching the time the data was added
         # -> handles updates on old data if needs be
@@ -74,29 +74,35 @@ def _extract_data_to_dataframe_at_time(t):
     Retrieves data from netcdf variables, for the given time value. Organize it into a Pandas dataframe with proper
     layout, to optimize publication into PostgreSQL DB
     """
-    print("Publishing data for day {} (index {}".format(t[1], t[0]))
+    print("Publishing data for day {} (index {})".format(t[1], t[0]))
     itime = t[0]
     nb_cells = nc.dimensions['n_cells'].size
     npst = np.ma.column_stack((
         np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
-        vfunc(np.full((nb_cells), nc.variables['time'][itime])),
-        nc.variables['water_elevation_catchment_analysis_mean'][itime, :],
-        nc.variables['water_elevation_catchment_analysis_median'][itime, :],
-        nc.variables['water_elevation_catchment_analysis_std'][itime, :],
-        nc.variables['streamflow_catchment_analysis_mean'][itime, :],
-        nc.variables['streamflow_catchment_analysis_median'][itime, :],
-        nc.variables['streamflow_catchment_analysis_std'][itime, :],
-        vfunc(np.full((nb_cells), nc.variables['time_added_to_hydb_analysis'][itime]))
+        vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time'][itime])),
+        nc.variables['water_elevation_catchment_mean'][itime, :],
+        nc.variables['water_elevation_catchment_median'][itime, :],
+        nc.variables['water_elevation_catchment_std'][itime, :],
+        nc.variables['water_elevation_catchment_mad'][itime, :],
+        nc.variables['streamflow_catchment_mean'][itime, :],
+        nc.variables['streamflow_catchment_median'][itime, :],
+        nc.variables['streamflow_catchment_std'][itime, :],
+        nc.variables['streamflow_catchment_mad'][itime, :],
+        vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time_added_to_hydb'][itime])),
+        np.full((nb_cells), nc.variables['is_analysis'][itime])
     ))
 
     df = pd.DataFrame(npst,
                       index=np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
-                      columns=['cell_id', 'date', 'elevation_mean', 'elevation_median', 'elevation_stddev',
-                               'flow_mean', 'flow_median', 'flow_stddev', 'update_time']
+                      columns=['cell_id', 'date', 'elevation_mean', 'elevation_median', 'elevation_stddev', 'elevation_mad',
+                               'flow_mean', 'flow_median', 'flow_stddev', 'flow_mad', 'update_time', 'is_analysis']
                       )
 
     # force cell_id type to smallint
-    df = df.astype({'cell_id': 'int16'})
+    df = df.astype({
+        'cell_id': 'int16',
+        'is_analysis': 'boolean'
+    })
     print(df)
     return df
 
@@ -161,8 +167,8 @@ def _update_state( errors, last_published_day_jd, last_updated_without_errors_jd
         cursor = conn.cursor()
         state_updt_query = """
                     UPDATE {}.state
-                    SET last_published_day = %s,
-                        last_published_day_jd = %s,
+                    SET last_updated = %s,
+                        last_updated_jd = %s,
                         update_errors = %s,
                         last_updated_without_errors = %s,
                         last_updated_without_errors_jd = %s
