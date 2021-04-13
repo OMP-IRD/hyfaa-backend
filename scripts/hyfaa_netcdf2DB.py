@@ -133,21 +133,21 @@ def _extract_data_to_dataframe_at_time(nc, ds, t):
     columns = columns_static + columns_dynamic
     npst = np.ma.column_stack(tuple(columns))
     labels = ['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars']]
-    # df = pd.DataFrame(npst,
-    #                   index=np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
-    #                   columns=['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars'] ]
-    #                   )
-    #
-    # # force cell_id type to smallint
-    # df = df.astype({
-    #     'cell_id': 'int16',
-    #     'is_analysis': 'boolean'
-    # })
-    # logging.debug(df)
-    return npst, labels
+    df = pd.DataFrame(npst,
+                      index=np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
+                      columns=['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars'] ]
+                      )
+
+    # force cell_id type to smallint
+    df = df.astype({
+        'cell_id': 'int16',
+        'is_analysis': 'boolean'
+    })
+    logging.debug(df)
+    return df
 
 
-def _publish_dataframe_to_db(np_grid, np_labels, ds):
+def _publish_dataframe_to_db(df, ds):
     """
     Publish the provided Pandas DataFrame into the DB. Using psycopg2.extras.execute_values() to insert the dataframe
     Returns: - nb of errors if there were (0 if everything went well)
@@ -157,14 +157,14 @@ def _publish_dataframe_to_db(np_grid, np_labels, ds):
     """
     try:
         # Create a list of tupples from the dataframe values
-        tuples = [tuple(x) for x in np_grid]
+        tuples = [tuple(x) for x in df.to_numpy()]
 
         # Comma-separated dataframe columns
-        cols = ','.join(np_labels)
+        cols = ','.join(list(df.columns))
 
         # Run an upsert command (on conflict etc)
         # Considers that the pkey is composed of the 2 first fields:
-        updatable_cols = list(np_labels)[2:]
+        updatable_cols = list(df.columns)[2:]
 
         # Write the update statement (internal part). EXCLUDED is a PG internal table contained rejected rows from the insert
         # see https://www.postgresql.org/docs/10/sql-insert.html#SQL-ON-CONFLICT
@@ -243,9 +243,9 @@ def publish_nc(ds, only_last_n_days):
     for t in update_times:
         tic = time.perf_counter()
         # netcdf to dataframe
-        np_grid, np_labels = _extract_data_to_dataframe_at_time(nc, ds, t)
+        df = _extract_data_to_dataframe_at_time(nc, ds, t)
         # dataframe to DB
-        e = _publish_dataframe_to_db(np_grid, np_labels, ds)
+        e = _publish_dataframe_to_db(df, ds)
         if not e:
             logging.info("Published data for time {} (index {}, greg. time {})".format(t[1], t[0], julianday_to_datetime(t[1])))
         else:
