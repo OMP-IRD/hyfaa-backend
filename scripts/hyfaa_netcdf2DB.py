@@ -6,11 +6,14 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import psycopg2.extras as extras
+import time
 import logging
 logging.basicConfig(level=logging.INFO)
 
 DATABASE_URI='postgresql://hyfaa_publisher:hyfaa_publisher@localhost:5432/mgb_hyfaa'
 DATABASE_SCHEMA='hyfaa'
+# Global psycopg2 connection
+conn=None
 
 sources = [
     {
@@ -72,11 +75,9 @@ def _retrieve_times_to_update(nc, tablename):
     Returns: a 3-tuple list: (time index, time value, time at which the data --for this time-frame-- was last updated)
     """
     update_times = None
-    conn = None
     last_published_day = 0
     last_updated_without_errors_jd = 0
     try:
-        conn = psycopg2.connect(DATABASE_URI)
         # retrieve state information from the DB, about the table we are about to update
         cursor = conn.cursor()
         cursor.execute("SELECT last_updated_jd, last_updated_without_errors_jd FROM {}.state WHERE tablename=%s".format(DATABASE_SCHEMA),
@@ -100,9 +101,8 @@ def _retrieve_times_to_update(nc, tablename):
         logging.error("Error fetching state from PostgreSQL table:\n", error)
     finally:
         # close database connection
-        if conn:
+        if cursor:
             cursor.close()
-            conn.close()
         return update_times, last_updated_without_errors_jd
 
 
@@ -121,10 +121,10 @@ def _extract_data_to_dataframe_at_time(nc, ds, t):
     # We will group the netcdf variables as columns of a 2D matrix (the pandas dataframe)
     # Common columns
     columns_static = [
-            np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
+            np.arange(start=1, stop=nb_cells + 1, dtype='i2'),
             vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time'][itime])),
             vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time_added_to_hydb'][itime])),
-            np.full((nb_cells), nc.variables['is_analysis'][itime])
+            np.full((nb_cells), nc.variables['is_analysis'][itime], dtype='?')
         ]
     # dynamic columns: depend on the dataserie considered
     columns_dynamic = [ nc.variables[j][itime, :] for j in ds['nc_data_vars'] ]
@@ -132,21 +132,22 @@ def _extract_data_to_dataframe_at_time(nc, ds, t):
     # Group them into a numpy masked array column_stack
     columns = columns_static + columns_dynamic
     npst = np.ma.column_stack(tuple(columns))
-    df = pd.DataFrame(npst,
-                      index=np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
-                      columns=['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars'] ]
-                      )
+    labels = ['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars']]
+    # df = pd.DataFrame(npst,
+    #                   index=np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
+    #                   columns=['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars'] ]
+    #                   )
+    #
+    # # force cell_id type to smallint
+    # df = df.astype({
+    #     'cell_id': 'int16',
+    #     'is_analysis': 'boolean'
+    # })
+    # logging.debug(df)
+    return npst, labels
 
-    # force cell_id type to smallint
-    df = df.astype({
-        'cell_id': 'int16',
-        'is_analysis': 'boolean'
-    })
-    logging.debug(df)
-    return df
 
-
-def _publish_dataframe_to_db(df, ds):
+def _publish_dataframe_to_db(np_grid, np_labels, ds):
     """
     Publish the provided Pandas DataFrame into the DB. Using psycopg2.extras.execute_values() to insert the dataframe
     Returns: - nb of errors if there were (0 if everything went well)
@@ -154,19 +155,16 @@ def _publish_dataframe_to_db(df, ds):
       * df: pandas dataframe to publish
       * ds: dataserie definition (one element of global `sources`list)
     """
-    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URI)
-
         # Create a list of tupples from the dataframe values
-        tuples = [tuple(x) for x in df.to_numpy()]
+        tuples = [tuple(x) for x in np_grid]
 
         # Comma-separated dataframe columns
-        cols = ','.join(list(df.columns))
+        cols = ','.join(np_labels)
 
         # Run an upsert command (on conflict etc)
         # Considers that the pkey is composed of the 2 first fields:
-        updatable_cols = list(df.columns)[2:]
+        updatable_cols = list(np_labels)[2:]
 
         # Write the update statement (internal part). EXCLUDED is a PG internal table contained rejected rows from the insert
         # see https://www.postgresql.org/docs/10/sql-insert.html#SQL-ON-CONFLICT
@@ -190,11 +188,8 @@ def _publish_dataframe_to_db(df, ds):
         logging.error("Error publishing data to PostgreSQL table", error)
         return 1
     finally:
-        # closing database connection
         if cursor:
             cursor.close()
-        if conn:
-            conn.close()
             # no error
         return 0
 
@@ -204,7 +199,6 @@ def _update_state( ds, errors, last_published_day_jd, last_updated_without_error
     Update the state entry in the DB
     """
     try:
-        conn = psycopg2.connect(DATABASE_URI)
         # retrieve state information from the DB, about the table we are about to update
         cursor = conn.cursor()
         state_updt_query = """
@@ -222,11 +216,8 @@ def _update_state( ds, errors, last_published_day_jd, last_updated_without_error
     except (Exception, psycopg2.Error) as error:
         logging.error("Error fetching data from PostgreSQL table", error)
     finally:
-        # closing database connection
         if cursor:
             cursor.close()
-        if conn:
-            conn.close()
 
 
 def publish_nc(ds, only_last_n_days):
@@ -250,16 +241,20 @@ def publish_nc(ds, only_last_n_days):
     # Iterate and publish all recent times
     errors = 0
     for t in update_times:
+        tic = time.perf_counter()
         # netcdf to dataframe
-        df = _extract_data_to_dataframe_at_time(nc, ds, t)
+        np_grid, np_labels = _extract_data_to_dataframe_at_time(nc, ds, t)
         # dataframe to DB
-        e = _publish_dataframe_to_db(df, ds)
+        e = _publish_dataframe_to_db(np_grid, np_labels, ds)
         if not e:
             logging.info("Published data for time {} (index {}, greg. time {})".format(t[1], t[0], julianday_to_datetime(t[1])))
         else:
             logging.warning("Encountered a DB error when publishing data for time {} ({}). Please watch your logs".format(t[0], t[1]))
         # count errors if there are
         errors += e
+
+        tac = time.perf_counter()
+        logging.info("processing time: {}".format(tac - tic))
     last_published_day_jd = max(list(zip(*update_times))[1])
     if not errors:
         # increment last update time without error
@@ -276,11 +271,25 @@ def publish(rootpath, only_last_n_days=None):
     First run publishes the whole serie of data (might take a long time). Unless only_last_n_days is set to a number of days (defaults to None), on which case only n last days will be published
     Subsequent runs only perform an update (UPSERT) on data modified or added since the previous run.
     """
-    for ds in sources:
-        nc_path = path.join(rootpath,ds['file'])
-        logging.info('Publishing {} data from {} to DB {} table'.format(ds['name'], nc_path, ds['tablename']))
-        ds['file'] = nc_path
-        publish_nc(ds, only_last_n_days=None)
+    try:
+        global conn
+        conn = psycopg2.connect(DATABASE_URI)
+
+        tic = time.perf_counter()
+        for ds in sources:
+            nc_path = path.join(rootpath,ds['file'])
+            logging.info('Publishing {} data from {} to DB {} table'.format(ds['name'], nc_path, ds['tablename']))
+            ds['file'] = nc_path
+            publish_nc(ds, only_last_n_days=None)
+        tac = time.perf_counter()
+        logging.info("Total processing time: {}".format(tac-tic))
+
+    except (Exception, psycopg2.Error) as error:
+        logging.error("Error establishing connection to PostgreSQL table", error)
+    finally:
+        # closing database connection
+        if conn:
+            conn.close()
 
 
 def main():
