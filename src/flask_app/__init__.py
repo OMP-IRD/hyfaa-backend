@@ -46,5 +46,9 @@ def init_app():
         def entry():
             return redirect('/api/v1')
 
+        @app.route('/api')
+        def entry():
+            return redirect('/api/v1')
+
         return app
 
