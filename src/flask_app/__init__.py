@@ -43,11 +43,11 @@ def init_app():
         app.register_blueprint(error_handlers.handlers_bp)
 
         @app.route('/')
-        def entry():
+        def redirect_root_to_apiv1():
             return redirect('/api/v1')
 
         @app.route('/api')
-        def entry():
+        def api_to_v1():
             return redirect('/api/v1')
 
         return app

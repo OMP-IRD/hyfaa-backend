@@ -354,7 +354,7 @@ def main():
 
     ROOTPATH = args.rootpath
     global DATABASE_URI
-    db_uri = args.db_connect_url or environ.get('DATABASE_URI')
+    db_uri = args.db_connect_url or environ.get('DATABASE_URI_RW')
     if db_uri:
         DATABASE_URI = db_uri
     global DATABASE_SCHEMA

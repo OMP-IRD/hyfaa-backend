@@ -36,7 +36,7 @@ Some comments:
  To run the netcdf publication script, you might run
  ```shell
 make docker-build
-docker run  -e DATABASE_URI=postgresql://hyfaa_backend:hyfaa_backend@[DB_HOST]:5432/mgb_hyfaa \
+docker run  -e DATABASE_URI_RW=postgresql://hyfaa_publisher:hyfaa_publisher@[DB_HOST]:5432/mgb_hyfaa \
             -v [path-to-scheduler-work-folder]:/hyfaa-scheduler/data \
             -p 5000:5000 pigeosolutions/hyfaa-backend:1.0 \
             python3 /hyfaa-backend/app/scripts/hyfaa_netcdf2DB.py /hyfaa-scheduler/data/
