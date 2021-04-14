@@ -26,6 +26,21 @@ sources = [
         'tablename': 'data_mgbstandard'
     },
     {
+        'name': 'forecast',
+        'file': 'assimilated_solution_databases/prevision_using_previous_years/post_processing_portal.nc',
+        'nc_data_vars': [
+            'water_elevation_catchment_mean',
+            'water_elevation_catchment_median',
+            'water_elevation_catchment_std',
+            'water_elevation_catchment_mad',
+            'streamflow_catchment_mean',
+            'streamflow_catchment_median',
+            'streamflow_catchment_std',
+            'streamflow_catchment_mad',
+         ],
+        'tablename': 'data_forecast'
+    },
+    {
         'name': 'assimilated',
         'file': 'assimilated_solution_databases/post_processing_portal.nc',
         'nc_data_vars': [
@@ -87,7 +102,9 @@ def _retrieve_times_to_update(nc, tablename):
             last_published_day = state_records[0]
             last_updated_without_errors_jd = state_records[1]
         else:
-            raise Exception("Could not retrieve state for table " + tablename)
+            last_published_day = 0
+            last_updated_without_errors_jd = 0
+            #raise Exception("Could not retrieve state for table " + tablename)
         # Build a list of all indices-time value (Julian Day)
         times_array = list(zip(
             np.arange(start=0, stop=nc.dimensions['n_time'].size, dtype='i4'),
@@ -195,22 +212,41 @@ def _update_state( ds, errors, last_published_day_jd, last_updated_without_error
     try:
         # retrieve state information from the DB, about the table we are about to update
         cursor = conn.cursor()
+        # state_updt_query = """
+        #             UPDATE {}.state
+        #             SET last_updated = %s,
+        #                 last_updated_jd = %s,
+        #                 update_errors = %s,
+        #                 last_updated_without_errors = %s,
+        #                 last_updated_without_errors_jd = %s
+        #             WHERE tablename = %s
+        #         """.format(DATABASE_SCHEMA)
+
         state_updt_query = """
-                    UPDATE {}.state
-                    SET last_updated = %s,
-                        last_updated_jd = %s,
-                        update_errors = %s,
-                        last_updated_without_errors = %s,
-                        last_updated_without_errors_jd = %s
-                    WHERE tablename = %s
-                """.format(DATABASE_SCHEMA)
+                    INSERT INTO {schema}.state (tablename, last_updated, last_updated_jd, update_errors, last_updated_without_errors, last_updated_without_errors_jd)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT ON CONSTRAINT state_pk
+                    DO UPDATE SET 
+                        last_updated = EXCLUDED.last_updated,
+                        last_updated_jd = EXCLUDED.last_updated_jd,
+                        update_errors = EXCLUDED.update_errors,
+                        last_updated_without_errors = EXCLUDED.last_updated_without_errors,
+                        last_updated_without_errors_jd = EXCLUDED.last_updated_without_errors_jd
+                    WHERE state."tablename" = '{table}'
+                """.format(schema=DATABASE_SCHEMA, table=ds['tablename'])
+
         cursor.execute(state_updt_query, (
-            julianday_to_datetime(last_published_day_jd), last_published_day_jd, errors,
-            julianday_to_datetime(last_updated_without_errors_jd), last_updated_without_errors_jd, ds['tablename']))
+            ds['tablename'],
+            julianday_to_datetime(last_published_day_jd),
+            last_published_day_jd,
+            errors,
+            julianday_to_datetime(last_updated_without_errors_jd),
+            last_updated_without_errors_jd
+        ))
 
         conn.commit()
     except (Exception, psycopg2.Error) as error:
-        logging.error("Error fetching data from PostgreSQL table", error)
+        logging.error("Error updating data on hyfaa.state table", error)
     finally:
         if cursor:
             cursor.close()
