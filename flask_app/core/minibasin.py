@@ -10,6 +10,7 @@ defaults = {
     'duration': '1 year'
 }
 
+
 def get_data(id, datatype, opts):
     """
     Retrieve data for the given minibasin.
@@ -38,11 +39,21 @@ def get_data(id, datatype, opts):
         values['forecast'] = _get_forecast_data(id, duration)
     return {'id': id, 'data': values}
 
+
 def _get_mgbstandard_data(minibasin_id, duration='1 year'):
-    return {}
+    json_output = {'error': 'no result'}
+    with engine.connect() as conn:
+        query = text("SELECT hyfaa.get_mgbstandard_values_for_minibasin(:id, :duration)")
+        rs = conn.execute(query, id=minibasin_id, duration=duration)
+        mini_record = rs.fetchone()
+        if mini_record:
+            json_output = mini_record[0]
+    return json_output
+
 
 def _get_forecast_data(minibasin_id, duration='1 year'):
     return {}
+
 
 def _get_assimilated_data(minibasin_id, duration='1 year'):
         """
