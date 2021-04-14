@@ -1,6 +1,6 @@
 """Initialize Flask app."""
 import os
-from flask import Flask
+from flask import Flask, redirect
 from .apis import api_v1
 
 
@@ -41,6 +41,10 @@ def init_app():
         # Register Blueprints
         app.register_blueprint(api, url_prefix='/api/v1')
         app.register_blueprint(error_handlers.handlers_bp)
+
+        @app.route('/')
+        def entry():
+            return redirect('/api/v1')
 
         return app
 
