@@ -120,23 +120,17 @@ def _extract_data_to_dataframe_at_time(nc, ds, t):
     nb_cells = nc.dimensions['n_cells'].size
     # We will group the netcdf variables as columns of a 2D matrix (the pandas dataframe)
     # Common columns
-    columns_static = [
-            np.arange(start=1, stop=nb_cells + 1, dtype='i2'),
-            vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time'][itime])),
-            vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time_added_to_hydb'][itime])),
-            np.full((nb_cells), nc.variables['is_analysis'][itime], dtype='?')
-        ]
+    columns_dict = {
+            'cell_id': np.arange(start=1, stop=nb_cells + 1, dtype='i2'),
+            'date': vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time'][itime])),
+            'update_time': vfunc_jd_to_dt(np.full((nb_cells), nc.variables['time_added_to_hydb'][itime])),
+            'is_analysis': np.full((nb_cells), nc.variables['is_analysis'][itime], dtype='?')
+    }
     # dynamic columns: depend on the dataserie considered
-    columns_dynamic = [ nc.variables[j][itime, :] for j in ds['nc_data_vars'] ]
+    for j in ds['nc_data_vars']:
+        columns_dict[short_names[j]] = nc.variables[j][itime, :]
 
-    # Group them into a numpy masked array column_stack
-    columns = columns_static + columns_dynamic
-    npst = np.ma.column_stack(tuple(columns))
-    labels = ['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars']]
-    df = pd.DataFrame(npst,
-                      index=np.arange(start=1, stop=nb_cells + 1, dtype='i4'),
-                      columns=['cell_id', 'date', 'update_time', 'is_analysis'] + [short_names[n] for n in ds['nc_data_vars'] ]
-                      )
+    df = pd.DataFrame.from_dict(columns_dict)
 
     # force cell_id type to smallint
     df = df.astype({
@@ -158,7 +152,7 @@ def _publish_dataframe_to_db(df, ds):
     try:
         # Create a list of tupples from the dataframe values
         tuples = [tuple(x) for x in df.to_numpy()]
-
+        # tuples = df.to_records(index=False).tolist() # seems faster but breaks the datetimes
         # Comma-separated dataframe columns
         cols = ','.join(list(df.columns))
 
@@ -213,6 +207,8 @@ def _update_state( ds, errors, last_published_day_jd, last_updated_without_error
         cursor.execute(state_updt_query, (
             julianday_to_datetime(last_published_day_jd), last_published_day_jd, errors,
             julianday_to_datetime(last_updated_without_errors_jd), last_updated_without_errors_jd, ds['tablename']))
+
+        conn.commit()
     except (Exception, psycopg2.Error) as error:
         logging.error("Error fetching data from PostgreSQL table", error)
     finally:
@@ -238,6 +234,10 @@ def publish_nc(ds, only_last_n_days):
     if only_last_n_days:
         update_times = update_times[-only_last_n_days:]
 
+    if not update_times:
+        logging.info("DB is up to date")
+        return
+
     # Iterate and publish all recent times
     errors = 0
     for t in update_times:
@@ -255,6 +255,7 @@ def publish_nc(ds, only_last_n_days):
 
         tac = time.perf_counter()
         logging.info("processing time: {}".format(tac - tic))
+
     last_published_day_jd = max(list(zip(*update_times))[1])
     if not errors:
         # increment last update time without error
@@ -280,7 +281,7 @@ def publish(rootpath, only_last_n_days=None):
             nc_path = path.join(rootpath,ds['file'])
             logging.info('Publishing {} data from {} to DB {} table'.format(ds['name'], nc_path, ds['tablename']))
             ds['file'] = nc_path
-            publish_nc(ds, only_last_n_days=None)
+            publish_nc(ds, only_last_n_days)
         tac = time.perf_counter()
         logging.info("Total processing time: {}".format(tac-tic))
 
