@@ -1,7 +1,7 @@
 """Initialize Flask app."""
 import os
 from flask import Flask, redirect
-from .apis import api_v1
+from flask_cors import CORS
 
 
 configurations = {
@@ -32,6 +32,7 @@ def init_app():
     """Create Flask application."""
     app = Flask(__name__, instance_relative_config=False)
     configure_app(app)
+    CORS(app)
 
     with app.app_context():
         # Import parts of our application
