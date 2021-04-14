@@ -53,10 +53,10 @@ class Station(Resource):
                         'description': 'MGB/HYFAA Data computed with assimilation',
                         'url': '{}/data/assimilated'.format(url_for('api_v1.station_by_id', id=id)),
                     },
-                'forecasts':
+                'forecast':
                     {
                         'description': 'MGB/HYFAA forecasts (10 days)',
-                        'url': '{}/data/forecasts'.format(url_for('api_v1.station_by_id', id=id)),
+                        'url': '{}/data/forecast'.format(url_for('api_v1.station_by_id', id=id)),
                     },
                 'all':
                     {
