@@ -32,8 +32,20 @@ Some comments:
 
   * it is of course better used i relation with the other related services, so we advise to use the docker-composition
    given in the parent project,  https://github.com/OMP-IRD/hyfaa-mgb-platform
-   
- To run the netcdf publication script, you might run
+ 
+ ## Netcdf publication script  
+ A script is provided for the publication of the netcdf files produced by the 
+ [HYFAA scheduler](https://github.com/OMP-IRD/hyfaa-scheduler) to the database that will be used by this backend 
+ application.
+ 
+ This script is for now included in this repo, but is not related to the flask application.
+ 
+ Its configuration is stored in `src/conf/script_config.hjson`. It uses [hjson](https://hjson.github.io/) format. 
+ This is the default configuration, but you can specify an alternate path using the SCRIPT_CONFIG_PATH env. variable, 
+ allowing you, for instance, to mount a config file, when using docker (actually, SCRIPT_CONFIG_PATH in the docker image
+ is set to `conf/script_config.hjson`).
+ 
+To run the script, you might run
  ```shell
 make docker-build
 docker run  -e DATABASE_URI_RW=postgresql://hyfaa_publisher:hyfaa_publisher@[DB_HOST]:5432/mgb_hyfaa \

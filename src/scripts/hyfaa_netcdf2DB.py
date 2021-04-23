@@ -7,6 +7,7 @@ import pandas as pd
 import psycopg2
 import psycopg2.extras as extras
 import time
+import hjson
 import logging
 logging.basicConfig(level=logging.INFO)
 
@@ -15,58 +16,7 @@ DATABASE_SCHEMA='hyfaa'
 # Global psycopg2 connection
 conn=None
 
-sources = [
-    {
-        'name': 'mgbstandard',
-        'file': 'mgbstandard_solution_databases/post_processing_portal.nc',
-        'nc_data_vars': [
-            'water_elevation_catchment_mean',
-            'streamflow_catchment_mean',
-         ],
-        'tablename': 'data_mgbstandard'
-    },
-    {
-        'name': 'forecast',
-        'file': 'assimilated_solution_databases/prevision_using_previous_years/post_processing_portal.nc',
-        'nc_data_vars': [
-            'water_elevation_catchment_mean',
-            'water_elevation_catchment_median',
-            'water_elevation_catchment_std',
-            'water_elevation_catchment_mad',
-            'streamflow_catchment_mean',
-            'streamflow_catchment_median',
-            'streamflow_catchment_std',
-            'streamflow_catchment_mad',
-         ],
-        'tablename': 'data_forecast'
-    },
-    {
-        'name': 'assimilated',
-        'file': 'assimilated_solution_databases/post_processing_portal.nc',
-        'nc_data_vars': [
-            'water_elevation_catchment_mean',
-            'water_elevation_catchment_median',
-            'water_elevation_catchment_std',
-            'water_elevation_catchment_mad',
-            'streamflow_catchment_mean',
-            'streamflow_catchment_median',
-            'streamflow_catchment_std',
-            'streamflow_catchment_mad',
-         ],
-        'tablename': 'data_assimilated'
-    },
-]
-
-short_names = {
-    'water_elevation_catchment_mean': 'elevation_mean',
-    'water_elevation_catchment_median': 'elevation_median',
-    'water_elevation_catchment_std': 'elevation_stddev',
-    'water_elevation_catchment_mad': 'elevation_mad',
-    'streamflow_catchment_mean': 'flow_mean',
-    'streamflow_catchment_median': 'flow_median',
-    'streamflow_catchment_std': 'flow_stddev',
-    'streamflow_catchment_mad': 'flow_mad',
-}
+script_config = None
 
 
 # Convert NaN to null values when pushing to PostgreSQL DB
@@ -129,7 +79,7 @@ def _extract_data_to_dataframe_at_time(nc, ds, t):
     layout, to optimize publication into PostgreSQL DB
     Params:
       * nc: netcdf4.Dataset input file
-      * ds: dataserie definition (one element of global `sources`list)
+      * ds: dataserie definition (one element of global script_config['sources'] list)
       * t: time to look for
     """
     logging.debug("Preparing data for day {} (index {})".format(t[1], t[0]))
@@ -145,7 +95,7 @@ def _extract_data_to_dataframe_at_time(nc, ds, t):
     }
     # dynamic columns: depend on the dataserie considered
     for j in ds['nc_data_vars']:
-        columns_dict[short_names[j]] = nc.variables[j][itime, :]
+        columns_dict[script_config['short_names'][j]] = nc.variables[j][itime, :]
 
     df = pd.DataFrame.from_dict(columns_dict)
 
@@ -164,7 +114,7 @@ def _publish_dataframe_to_db(df, ds):
     Returns: - nb of errors if there were (0 if everything went well)
     Params:
       * df: pandas dataframe to publish
-      * ds: dataserie definition (one element of global `sources`list)
+      * ds: dataserie definition (one element of global script_config['sources'] list)
     """
     try:
         # Create a list of tupples from the dataframe values
@@ -259,7 +209,7 @@ def publish_nc(ds, only_last_n_days):
     Then publishes them using an UPSERT command.
     Finally updates the `state` table
     Params:
-      * ds: dataserie definition (one element of global `sources` list, see above)
+      * ds: dataserie definition (one element of global script_config['sources']  list, see above)
       * only_last_n_days: int: allows to truncate the extraction to the last n days (useful when you are in a hurry)
     """
     nc = Dataset(ds['file'], "r", format="netCDF4")
@@ -313,16 +263,21 @@ def publish(rootpath, only_last_n_days=None):
         conn = psycopg2.connect(DATABASE_URI)
 
         tic = time.perf_counter()
-        for ds in sources:
+        for ds in script_config['sources']:
             nc_path = path.join(rootpath,ds['file'])
             logging.info('Publishing {} data from {} to DB {} table'.format(ds['name'], nc_path, ds['tablename']))
+            # beware, this is a bit acrobatic, I'm altering here the path in the configuration object
             ds['file'] = nc_path
             publish_nc(ds, only_last_n_days)
         tac = time.perf_counter()
         logging.info("Total processing time: {}".format(tac-tic))
 
-    except (Exception, psycopg2.Error) as error:
+    except (psycopg2.Error) as error:
         logging.error("Error establishing connection to PostgreSQL table", error)
+    except (FileNotFoundError) as error:
+        logging.error("Wrong path to netcdf file or file non existant", error)
+    except (Exception) as error:
+        logging.error("Error trying to publish netcdf data to database", error)
     finally:
         # closing database connection
         if conn:
@@ -360,6 +315,16 @@ def main():
     global DATABASE_SCHEMA
     DATABASE_SCHEMA = args.schema
     only_last_n_days = args.only_last_n_days
+
+    # Read configuration from hjson file
+    SCRIPT_CONFIG_PATH = environ.get('SCRIPT_CONFIG_PATH', 'src/conf/script_config.hjson')
+    with open(SCRIPT_CONFIG_PATH) as config_file:
+        global script_config
+        script_config = hjson.load(config_file)
+
+    if not script_config:
+        logging.error("Could not load script config file (script_config.hjson")
+        return 1
 
     publish(ROOTPATH, only_last_n_days)
 

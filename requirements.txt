@@ -5,6 +5,7 @@ numpy>=1.20.1
 pandas>=1.2.2
 psycopg2-binary>=2.7.7
 six==1.15.0
+hjson>=3.0.2
 
 # requirements for the API
 Flask==1.1.2

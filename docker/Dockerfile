@@ -31,4 +31,6 @@ VOLUME ["/hyfaa-scheduler/data"]
 
 USER hyfaa
 
+ENV SCRIPT_CONFIG_PATH="conf/script_config.hjson"
+
 CMD ["uwsgi", "--http", ":5000", "--chdir", "/hyfaa-backend/app", "--wsgi-file", "wsgi.py", "--callable", "app", "--master", "--processes", "4", "--threads", "2", "--uid", "hyfaa", "--stats", "127.0.0.1:9191"]

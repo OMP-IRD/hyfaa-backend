@@ -5,9 +5,9 @@ from flask_cors import CORS
 
 
 configurations = {
-    "dev": "config.DevelopmentConfig",
+    "development": "config.DevelopmentConfig",
     "staging": "config.StagingConfig",
-    "prod": "config.ProductionConfig",
+    "production": "config.ProductionConfig",
     "default": "config.DevelopmentConfig"
 }
 ENVIRONMENT_OVERRIDES = [
