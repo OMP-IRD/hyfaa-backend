@@ -78,7 +78,14 @@ class StationData(Resource):
         404: 'Station not found'
     })
     def get(self, id, dataserie):
-        '''Retrieve MGB/HYFAA data for a station, given its identifier and a dataserie name (or `all` to get all available dataseries.'''
+        '''
+        Retrieve MGB/HYFAA data for a station, given its identifier and a dataserie name (or `all` to get all available dataseries.
+        The returned object provides, for the demanded dataserie:
+        * "date": the date for which the value has been computed
+        * "flow": (m³/s) values representing the median for assimilated and forecast dataseries, the mean for mgbstandard serie
+        * "flow_mad": [assimilated and forecast dataseries only] median absolute deviation
+        * "expected": [assimilated and forecast dataseries only] (m³/s) the expected value, based on the mean values on this same day over the years
+        '''
         parser = reqparse.RequestParser()
         parser.add_argument('duration', type=pg_time_interval, location='args', help=str_duration_help)
         args = parser.parse_args()
