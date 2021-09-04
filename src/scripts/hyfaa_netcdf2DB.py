@@ -13,6 +13,8 @@ logging.basicConfig(level=logging.INFO)
 
 DATABASE_URI='postgresql://hyfaa_publisher:hyfaa_publisher@localhost:5432/mgb_hyfaa'
 DATABASE_SCHEMA='hyfaa'
+COMMIT_PAGE_SIZE=1
+FORCE_UPDATE=False # if True, force update on all values. By default, only data updated since last publish will be published
 # Global psycopg2 connection
 conn=None
 
@@ -36,41 +38,47 @@ vfunc_jd_to_dt = np.vectorize(julianday_to_datetime)
 
 def _retrieve_times_to_update(nc, tablename):
     """
-    Extract the list of times where the data have been updated.
+    Extract the list of times where the data have been updated (unless FORCE_UPDATE is True, in which case it will return
+    all the time values
     Returns: a 3-tuple list: (time index, time value, time at which the data --for this time-frame-- was last updated)
     """
     update_times = None
     last_published_day = 0
     last_updated_without_errors_jd = 0
-    try:
-        # retrieve state information from the DB, about the table we are about to update
-        cursor = conn.cursor()
-        cursor.execute("SELECT last_updated_jd, last_updated_without_errors_jd FROM {}.state WHERE tablename=%s".format(DATABASE_SCHEMA),
-                       (tablename,))
-        state_records = cursor.fetchone()
-        if state_records:
-            last_published_day = state_records[0]
-            last_updated_without_errors_jd = state_records[1]
-        else:
-            last_published_day = 0
-            last_updated_without_errors_jd = 0
-            #raise Exception("Could not retrieve state for table " + tablename)
-        # Build a list of all indices-time value (Julian Day)
-        times_array = list(zip(
-            np.arange(start=0, stop=nc.dimensions['n_time'].size, dtype='i4'),
-            nc.variables['time'][:],
-            nc.variables['time_added_to_hydb'][:]
-        ))
-        # Filter to only the times posterior to last update (fetching the time the data was added
-        # -> handles updates on old data if needs be
-        update_times = list(filter(lambda t: t[2] > last_updated_without_errors_jd, times_array))
-    except (Exception, psycopg2.Error) as error:
-        logging.error("Error fetching state from PostgreSQL table:\n", error)
-    finally:
-        # close database connection
-        if cursor:
-            cursor.close()
-        return update_times, last_updated_without_errors_jd
+    # Build a list of all indices-time value (Julian Day)
+    times_array = list(zip(
+        np.arange(start=0, stop=nc.dimensions['n_time'].size, dtype='i4'),
+        nc.variables['time'][:],
+        nc.variables['time_added_to_hydb'][:]
+    ))
+    if FORCE_UPDATE:
+        # Don't filter, return everything. Force update on every date
+        logging.info("Forcing update on all the time values")
+        return times_array, 0
+    else:
+        try:
+            # retrieve state information from the DB, about the table we are about to update
+            cursor = conn.cursor()
+            cursor.execute("SELECT last_updated_jd, last_updated_without_errors_jd FROM {}.state WHERE tablename=%s".format(DATABASE_SCHEMA),
+                           (tablename,))
+            state_records = cursor.fetchone()
+            if state_records:
+                last_published_day = state_records[0]
+                last_updated_without_errors_jd = state_records[1]
+            else:
+                last_published_day = 0
+                last_updated_without_errors_jd = 0
+                #raise Exception("Could not retrieve state for table " + tablename)
+            # Filter to only the times posterior to last update (fetching the time the data was added
+            # -> handles updates on old data if needs be
+            update_times = list(filter(lambda t: t[2] > last_updated_without_errors_jd, times_array))
+        except (Exception, psycopg2.Error) as error:
+            logging.error("Error fetching state from PostgreSQL table:\n", error)
+        finally:
+            # close database connection
+            if cursor:
+                cursor.close()
+            return update_times, last_updated_without_errors_jd
 
 
 def _extract_data_to_dataframe_at_time(nc, ds, t):
@@ -134,7 +142,7 @@ def _publish_dataframe_to_db(df, ds):
         query = "INSERT INTO {schema}.{table}({cols}) VALUES %s ON CONFLICT ON CONSTRAINT  {table}_pk DO UPDATE SET {updt_stmt};".format(
             schema=DATABASE_SCHEMA, table=ds['tablename'], cols=cols, updt_stmt=update_stmt)
 
-        # Execute the uery
+        # Execute the query
         cursor = conn.cursor()
         try:
             extras.execute_values(cursor, query, tuples)
@@ -226,18 +234,28 @@ def publish_nc(ds, only_last_n_days):
 
     # Iterate and publish all recent times
     errors = 0
+    # Initialize trnasitionnal dataframe and counter. This is a mechanims for paginating DB commits (not commit every
+    # different time, which is very slow
+    concatenated_df = pd.DataFrame()
+    counter = 1
     for t in update_times:
         tic = time.perf_counter()
         # netcdf to dataframe
         df = _extract_data_to_dataframe_at_time(nc, ds, t)
-        # dataframe to DB
-        e = _publish_dataframe_to_db(df, ds)
-        if not e:
-            logging.info("Published data for time {} (index {}, greg. time {})".format(t[1], t[0], julianday_to_datetime(t[1])))
-        else:
-            logging.warning("Encountered a DB error when publishing data for time {} ({}). Please watch your logs".format(t[0], t[1]))
-        # count errors if there are
-        errors += e
+        concatenated_df = pd.concat([df, concatenated_df])
+
+        if (counter % COMMIT_PAGE_SIZE == 0) or (t[0] == update_times[-1][0]): # last part means is last time element
+            # dataframe to DB
+            e = _publish_dataframe_to_db(concatenated_df, ds)
+            if not e:
+                logging.info("Published data for time {} (index {}, greg. time {})".format(t[1], t[0], julianday_to_datetime(t[1])))
+            else:
+                logging.warning("Encountered a DB error when publishing data for time {} ({}). Please watch your logs".format(t[0], t[1]))
+            # count errors if there are
+            errors += e
+
+            concatenated_df = pd.DataFrame()
+        counter +=1
 
         tac = time.perf_counter()
         logging.info("processing time: {}".format(tac - tic))
@@ -301,10 +319,18 @@ def main():
     parser.add_argument('-s', '--schema',
                         default='hyfaa',
                         help='DB schema (Default: "hyfaa")')
+    parser.add_argument('-f', '--force_update',
+                        default=False,
+                        action='store_true',
+                        help='Force update on all values. By default, only data updated since last publish will be published')
     parser.add_argument('--only_last_n_days',
                         type = int,
                         default=None,
                         help='if set, only the only_last_n_days days will be published (useful for publishing only a sample of data. Default: None)')
+    parser.add_argument('--commit_page_size',
+                        type = int,
+                        default=1,
+                        help='Commit the data into the DB every n different dates (default 1). Should run faster if set to 10 or 50')
     args = parser.parse_args()
 
     ROOTPATH = args.rootpath
@@ -315,6 +341,12 @@ def main():
     global DATABASE_SCHEMA
     DATABASE_SCHEMA = args.schema
     only_last_n_days = args.only_last_n_days
+
+
+    global COMMIT_PAGE_SIZE
+    COMMIT_PAGE_SIZE = args.commit_page_size
+    global FORCE_UPDATE
+    FORCE_UPDATE = args.force_update
 
     # Read configuration from hjson file
     SCRIPT_CONFIG_PATH = environ.get('SCRIPT_CONFIG_PATH', 'src/conf/script_config.hjson')
